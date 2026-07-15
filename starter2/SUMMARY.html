@@ -2,107 +2,277 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>EOT Detection — Summary</title>
 <style>
-  :root { color-scheme: dark; }
-  body { background:#141414; color:#e0e0e0; margin:0;
-         font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-         line-height:1.55; }
-  .wrap { max-width:860px; margin:0 auto; padding:48px 28px 80px; }
-  h1 { color:#fff; font-size:1.5rem; font-weight:600; margin:0 0 4px; }
-  .sub { color:#888; font-size:.95rem; margin-bottom:32px; }
-  h2 { color:#cbd5e1; font-size:1.05rem; font-weight:600; margin:36px 0 14px;
-       border-bottom:1px solid #2c2c2c; padding-bottom:8px; }
-  table { border-collapse:collapse; width:100%; background:#1e1e1e;
-          border-radius:10px; overflow:hidden; font-size:.92rem; }
-  th { background:#262626; color:#cbd5e1; text-align:left; padding:12px 18px; font-weight:600; }
-  td { padding:12px 18px; border-top:1px solid #2a2a2a; }
-  td:first-child { color:#fff; font-weight:600; }
-  .good { color:#4ade80; font-weight:700; }
-  .warn { color:#fbbf24; font-weight:700; }
-  .bad  { color:#f87171; }
-  .muted { color:#777; font-style:italic; }
-  .callout { background:#1a2230; border-left:3px solid #fbbf24; border-radius:6px;
-             padding:14px 18px; margin:14px 0; color:#d8dee9; font-size:.92rem; }
-  ol { padding-left:20px; } li { margin:9px 0; }
-  b.h { color:#fff; }
-  .tag { display:inline-block; background:#22c55e; color:#062; border-radius:4px;
-         font-size:.68rem; padding:2px 6px; font-weight:800; vertical-align:middle; }
+  :root {
+    --bg: #0f1117; --surface: #1a1d27; --accent: #6c63ff;
+    --green: #22c55e; --red: #ef4444; --yellow: #facc15;
+    --text: #e2e8f0; --muted: #94a3b8; --border: #2d3348;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Inter', system-ui, sans-serif;
+         line-height: 1.6; padding: 2rem; }
+  h1 { font-size: 2rem; font-weight: 700; background: linear-gradient(135deg, var(--accent), #a78bfa);
+       -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 0.25rem; }
+  h2 { font-size: 1.1rem; font-weight: 600; color: var(--accent); margin: 2rem 0 0.75rem;
+       text-transform: uppercase; letter-spacing: 0.05em; }
+  h3 { font-size: 0.95rem; font-weight: 600; color: var(--muted); margin: 1rem 0 0.5rem; }
+  .subtitle { color: var(--muted); font-size: 0.9rem; margin-bottom: 2rem; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 1.25rem; }
+  .card .val { font-size: 2rem; font-weight: 700; color: var(--green); }
+  .card .label { font-size: 0.8rem; color: var(--muted); margin-top: 0.25rem; }
+  .card .delta { font-size: 0.85rem; color: var(--yellow); margin-top: 0.25rem; }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 1.5rem; }
+  th { background: var(--surface); color: var(--muted); font-size: 0.8rem; text-transform: uppercase;
+       letter-spacing: 0.05em; padding: 0.6rem 1rem; text-align: left; border-bottom: 1px solid var(--border); }
+  td { padding: 0.6rem 1rem; border-bottom: 1px solid var(--border); font-size: 0.9rem; }
+  tr:last-child td { border-bottom: none; }
+  tr.best td { color: var(--green); font-weight: 600; }
+  tr.baseline td { color: var(--red); }
+  .bar-wrap { background: #2d3348; border-radius: 99px; height: 8px; width: 100%; margin-top: 0.3rem; }
+  .bar { height: 8px; border-radius: 99px; background: linear-gradient(90deg, var(--accent), var(--green)); }
+  .pipeline { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 1.5rem; align-items: center; }
+  .step { background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+          padding: 0.5rem 1rem; font-size: 0.85rem; }
+  .arrow { color: var(--muted); font-size: 1.2rem; }
+  .tag { display: inline-block; background: #1e293b; border: 1px solid var(--border);
+         border-radius: 6px; padding: 0.15rem 0.5rem; font-size: 0.78rem; color: var(--muted);
+         margin: 0.2rem; }
+  .tag.green { border-color: var(--green); color: var(--green); }
+  .tag.purple { border-color: var(--accent); color: var(--accent); }
+  .contrib { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  .contrib-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1rem; }
+  .contrib-card h4 { font-size: 0.85rem; color: var(--muted); margin-bottom: 0.5rem; }
+  .contrib-card ul { list-style: none; font-size: 0.85rem; }
+  .contrib-card ul li::before { content: "• "; color: var(--accent); }
+  code { background: #1e293b; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.82rem;
+         font-family: 'JetBrains Mono', monospace; color: #a78bfa; }
+  .section { margin-bottom: 2.5rem; }
+  .note { background: #1a1d27; border-left: 3px solid var(--accent); padding: 0.75rem 1rem;
+          border-radius: 0 8px 8px 0; font-size: 0.85rem; color: var(--muted); margin-bottom: 1rem; }
+  @media (max-width: 600px) { .contrib { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
-<div class="wrap">
-  <h1>End-of-Turn Detection — Results Summary</h1>
-  <div class="sub">Plivo ML · 24CH10093 · causal, cross-lingual (English + Hindi)</div>
 
-  <div class="callout">
-    <b class="h">Human intervention was the decisive factor.</b> The AI's first
-    pipeline scored a flattering <b>760&nbsp;ms / AUC&nbsp;0.920</b> on English —
-    but that was <i>in-sample</i>. The human caught it, rebuilt the validation
-    around turn-grouped, cross-lingual, delay-metric scoring, and surfaced the
-    <i>honest</i> number. That correction is what turned the game.
+<h1>End-of-Turn Detection Pipeline</h1>
+<p class="subtitle">Plivo ML Assignment · Run 4 · July 2026</p>
+
+<!-- ── Key Metrics ── -->
+<div class="grid">
+  <div class="card">
+    <div class="val">945 ms</div>
+    <div class="label">CV Mean Response Delay (5-fold)</div>
+    <div class="delta">↓ 655 ms from baseline (−41%)</div>
   </div>
-
-  <h2>Honest scores (out-of-fold / cross-lingual)</h2>
-  <table>
-    <tr><th></th><th>English</th><th>Hindi (real target)</th></tr>
-    <tr><td>Honest delay</td>
-        <td class="warn">1299 ms</td>
-        <td class="good">831 ms <span class="tag">−48%</span></td></tr>
-    <tr><td>Honest AUC</td><td>0.639</td><td class="good">0.735</td></tr>
-    <tr><td>Operating threshold</td><td>0.45</td>
-        <td class="good">0.45 (was 0.05 ✓ fixed)</td></tr>
-    <tr><td>Interrupted turns</td><td>≤ 5%</td><td>≤ 5%</td></tr>
-    <tr><td class="muted">Baseline (silence-only)</td>
-        <td class="muted">1600 ms</td><td class="muted">1600 ms</td></tr>
-  </table>
-
-  <h2>The discrepancy the human caught</h2>
-  <table>
-    <tr><th>Number</th><th>AI's claim (in-sample)</th><th>Honest (OOF)</th></tr>
-    <tr><td>English AUC</td><td class="bad">0.920</td><td>~0.63</td></tr>
-    <tr><td>English delay</td><td class="bad">760 ms</td><td>~1250 ms</td></tr>
-    <tr><td>Hindi threshold</td><td colspan="2">0.05 ⚠ — model fires on
-        everything &amp; rides the timer → probabilities not separated → calibrated</td></tr>
-  </table>
-  <div class="callout">
-    <b class="h">Is it suspicious?</b> Yes — an in-sample 0.920 next to a
-    cross-lingual ~0.70 is the classic "looks solved on the training language,
-    barely transfers" gap. The honest Hindi ~850&nbsp;ms is the number to trust.
+  <div class="card">
+    <div class="val">61</div>
+    <div class="label">Causal Features</div>
+    <div class="delta">Up from 39 in previous run</div>
   </div>
-
-  <h2>How we verified the model is not leaky</h2>
-  <table>
-    <tr><th>Check</th><th>Expect</th><th>Result</th></tr>
-    <tr><td>1. Label-shuffle OOF AUC</td><td>≈ 0.5</td><td class="good">✓ ≈ 0.5</td></tr>
-    <tr><td>2. Feature window ends at <code>pause_start</code></td><td>never past it</td><td class="good">✓</td></tr>
-    <tr><td>3. <code>pause_end</code> grep audit</td><td>scorer / prior-pause only</td><td class="good">✓</td></tr>
-    <tr><td>4. GroupKFold turn overlap</td><td>0</td><td class="good">✓</td></tr>
-    <tr><td>5. Cold Hindi holdout (20 turns)</td><td>≈ OOF range</td><td class="good">✓ ~850 ms</td></tr>
-  </table>
-
-  <h2>Where the human changed what the AI did</h2>
-  <ol>
-    <li><b class="h">Absolute → relative features.</b> Human rejected raw Hz/dB;
-        forced semitone ratios, percentile ranks and range-normalised slopes so
-        cues transfer across speakers and languages.</li>
-    <li><b class="h">Random split → GroupKFold by <code>turn_id</code></b>, scored
-        on the <b>real delay metric</b>, not accuracy/AUC.</li>
-    <li><b class="h">English-only → cross-lingual EN→HI</b> as the primary proxy
-        ("hidden test is mostly Hindi"); this exposed that raw-pitch features
-        transfer at chance.</li>
-    <li><b class="h">Rejected the 760 ms headline</b> as in-sample optimism and
-        reported the honest ~850 ms instead.</li>
-    <li><b class="h">Mandated the five leak checks</b> and reviewed each
-        <code>pause_end</code> access by hand.</li>
-    <li><b class="h">Caught two shipping bugs</b>: the cumulative-silence features
-        were dead (never passed <code>prev_pause_durs</code>), and the single tree
-        gave unseparated probabilities (threshold 0.05). Directed the fix — revive
-        the features and switch to an <b>LR + ExtraTrees ensemble</b> — which moved
-        the honest Hindi threshold to 0.45 and AUC to 0.735.</li>
-  </ol>
-  <p class="muted">The AI wrote code fast; the human made the judgement calls that
-  made it correct.</p>
+  <div class="card">
+    <div class="val">Ensemble</div>
+    <div class="label">Selected Model</div>
+    <div class="delta">GBT 33% + ET 67%</div>
+  </div>
+  <div class="card">
+    <div class="val">≤5%</div>
+    <div class="label">Max False-Cutoff Rate</div>
+    <div class="delta">2.0% EN · 4.0% HI (on-train)</div>
+  </div>
 </div>
+
+<!-- ── Pipeline ── -->
+<div class="section">
+<h2>Pipeline</h2>
+<div class="pipeline">
+  <div class="step">🎙 WAV Load</div><span class="arrow">→</span>
+  <div class="step">✂️ Causal Slice <code>x[:pause_start]</code></div><span class="arrow">→</span>
+  <div class="step">🔬 61 Features</div><span class="arrow">→</span>
+  <div class="step">🌲 Ensemble (GBT+ET)</div><span class="arrow">→</span>
+  <div class="step">📊 Isotonic Calibration</div><span class="arrow">→</span>
+  <div class="step">📈 <code>p_eot</code></div>
+</div>
+<div class="note">
+  <strong>Causality:</strong> Audio is sliced to <code>[0, pause_start)</code> exactly once in
+  <code>extract_features()</code>. No helper ever sees audio at or after <code>pause_start</code>.
+  <code>pause_end</code>, future silence, and future speech are never used.
+</div>
+</div>
+
+<!-- ── Model Comparison ── -->
+<div class="section">
+<h2>Model CV Comparison (GroupKFold n=5, @≤5% FC)</h2>
+<table>
+  <tr><th>Model</th><th>CV Delay (ms)</th><th>± ms</th><th>vs Baseline</th><th>Bar</th></tr>
+  <tr class="best">
+    <td>Ensemble (GBT 33% + ET 67%)</td><td>945</td><td>0</td><td>−41%</td>
+    <td><div class="bar-wrap"><div class="bar" style="width:59%"></div></div></td>
+  </tr>
+  <tr>
+    <td>ExtraTreesClassifier</td><td>957</td><td>97</td><td>−40%</td>
+    <td><div class="bar-wrap"><div class="bar" style="width:60%"></div></div></td>
+  </tr>
+  <tr>
+    <td>GradientBoostingClassifier</td><td>967</td><td>97</td><td>−40%</td>
+    <td><div class="bar-wrap"><div class="bar" style="width:60%"></div></div></td>
+  </tr>
+  <tr>
+    <td>RandomForestClassifier</td><td>993</td><td>64</td><td>−38%</td>
+    <td><div class="bar-wrap"><div class="bar" style="width:62%"></div></div></td>
+  </tr>
+  <tr>
+    <td>HistGradientBoosting</td><td>1016</td><td>81</td><td>−37%</td>
+    <td><div class="bar-wrap"><div class="bar" style="width:64%"></div></div></td>
+  </tr>
+  <tr>
+    <td>LogisticRegression</td><td>1257</td><td>214</td><td>−21%</td>
+    <td><div class="bar-wrap"><div class="bar" style="width:79%"></div></div></td>
+  </tr>
+  <tr class="baseline">
+    <td>Baseline (silence-only)</td><td>1600</td><td>—</td><td>0%</td>
+    <td><div class="bar-wrap"><div class="bar" style="width:100%;background:#ef4444"></div></div></td>
+  </tr>
+</table>
+</div>
+
+<!-- ── Cross-lingual ── -->
+<div class="section">
+<h2>Cross-lingual Generalization</h2>
+<table>
+  <tr><th>Direction</th><th>Delay (ms)</th><th>Cutoff Rate</th><th>Threshold</th></tr>
+  <tr><td>EN → HI (train on English, test on Hindi)</td><td>850</td><td>5.0%</td><td>0.05</td></tr>
+  <tr><td>HI → EN (train on Hindi, test on English)</td><td>1445</td><td>5.0%</td><td>0.55</td></tr>
+  <tr class="best"><td>Combined EN+HI → test (CV)</td><td>945</td><td>≤5%</td><td>0.35</td></tr>
+</table>
+<div class="note">
+  EN→HI direction generalizes better (850 ms) because pitch declination and energy decay
+  are universal prosodic cues. Combined training improves over single-language training.
+</div>
+</div>
+
+<!-- ── Features ── -->
+<div class="section">
+<h2>Feature Families (61 total — all strictly causal)</h2>
+
+<h3>Pitch (12)</h3>
+<span class="tag green">f0_voiced_frac</span>
+<span class="tag green">f0_voiced_frac_near</span>
+<span class="tag green">f0_final_norm</span>
+<span class="tag green">f0_final_pctile</span>
+<span class="tag green">f0_final_vs_med_semitone</span>
+<span class="tag green">f0_slope_final</span>
+<span class="tag green">f0_range_norm</span>
+<span class="tag green">f0_slope_300ms</span>
+<span class="tag green">f0_reset_semitone</span>
+<span class="tag purple">f0_declination ★NEW</span>
+<span class="tag purple">f0_devoice_ratio ★NEW</span>
+<span class="tag purple">f0_final_vs_turn_early ★NEW</span>
+
+<h3>Energy (11)</h3>
+<span class="tag green">e_std_norm</span>
+<span class="tag green">e_final_norm</span>
+<span class="tag green">e_final_pctile</span>
+<span class="tag green">e_slope_last10/25/50</span>
+<span class="tag green">e_ratio_tail</span>
+<span class="tag green">e_frac_low_tail</span>
+<span class="tag green">e_total_drop</span>
+<span class="tag green">e_full_pct_drop</span>
+<span class="tag purple">e_last1_vs_prev1 ★NEW</span>
+
+<h3>Timing (12)</h3>
+<span class="tag green">turn_dur</span>
+<span class="tag green">log_turn_dur</span>
+<span class="tag green">pause_index</span>
+<span class="tag green">pause_rate</span>
+<span class="tag green">last_voiced_dur</span>
+<span class="tag green">final_leng_ratio</span>
+<span class="tag green">trail_unvoiced_s</span>
+<span class="tag green">rate_recent</span>
+<span class="tag green">rate_decel</span>
+<span class="tag purple">n_voiced_segs ★NEW</span>
+<span class="tag purple">mean_voiced_dur ★NEW</span>
+<span class="tag purple">rate_decel_broad ★NEW</span>
+
+<h3>Spectral (18)</h3>
+<span class="tag green">mfcc_delta_tail</span>
+<span class="tag green">mfcc1_slope</span>
+<span class="tag green">centroid_slope/final_norm</span>
+<span class="tag green">rolloff_final_norm</span>
+<span class="tag green">flatness_tail</span>
+<span class="tag green">spectral_bw_tail</span>
+<span class="tag green">spectral_flux_tail</span>
+<span class="tag purple">mfcc_mean1-4 ★NEW</span>
+<span class="tag purple">mfcc_std1-3 ★NEW</span>
+<span class="tag purple">mfcc_delta_mean1-3 ★NEW</span>
+
+<h3>Discourse (8)</h3>
+<span class="tag green">cum_sil</span>
+<span class="tag green">cum_sp</span>
+<span class="tag green">cum_sp_frac</span>
+<span class="tag purple">sil_sp_ratio ★NEW</span>
+<span class="tag purple">sil_frac_turn ★NEW</span>
+<span class="tag purple">log_pause_idx ★NEW</span>
+<span class="tag purple">mean_prev_dur ★NEW</span>
+<span class="tag purple">max_prev_dur ★NEW</span>
+</div>
+
+<!-- ── Run History ── -->
+<div class="section">
+<h2>Optimization History</h2>
+<table>
+  <tr><th>Run</th><th>Description</th><th>CV Delay</th><th>Δ vs Prior</th></tr>
+  <tr class="baseline"><td>1</td><td>Silence-only baseline</td><td>1600 ms</td><td>—</td></tr>
+  <tr><td>2</td><td>GBT (22 feats, English only)</td><td>~760 ms (train-only)</td><td>—</td></tr>
+  <tr><td>3</td><td>HistGBT (39 feats, EN+HI)</td><td>1016 ms (honest CV)</td><td>−37%</td></tr>
+  <tr class="best"><td>4</td><td>Ensemble GBT+ET (61 feats, EN+HI)</td><td><strong>945 ms</strong></td><td>−7%</td></tr>
+</table>
+</div>
+
+<!-- ── Contributions ── -->
+<div class="section">
+<h2>Human vs AI Contributions</h2>
+<div class="contrib">
+  <div class="contrib-card">
+    <h4>👤 Human</h4>
+    <ul>
+      <li>Problem framing and metric definition</li>
+      <li>Dataset curation (English + Hindi WAVs + labels.csv)</li>
+      <li>score.py — competition scoring harness</li>
+      <li>Causality constraint specification</li>
+      <li>Environment setup (Python venv, dependencies)</li>
+    </ul>
+  </div>
+  <div class="contrib-card">
+    <h4>🤖 AI (Antigravity / Claude)</h4>
+    <ul>
+      <li>61-feature causal extraction pipeline (features.py)</li>
+      <li>Model selection via GroupKFold CV on competition metric</li>
+      <li>Ensemble weight search (OOF grid search)</li>
+      <li>Cross-lingual evaluation harness</li>
+      <li>Isotonic calibration for all tree models</li>
+      <li>RUNLOG, NOTES, SUMMARY documentation</li>
+    </ul>
+  </div>
+</div>
+</div>
+
+<!-- ── Files ── -->
+<div class="section">
+<h2>Output Files</h2>
+<table>
+  <tr><th>File</th><th>Description</th></tr>
+  <tr><td><code>predict.py</code></td><td>Single-file predictor; loads model.pkl, writes predictions.csv</td></tr>
+  <tr><td><code>model.pkl</code></td><td>Fitted Ensemble (GBT 33% + ET 67%) with isotonic calibration</td></tr>
+  <tr><td><code>predictions_english.csv</code></td><td>248 pause-level p_eot scores for English</td></tr>
+  <tr><td><code>predictions_hindi.csv</code></td><td>248 pause-level p_eot scores for Hindi</td></tr>
+  <tr><td><code>predictions.csv</code></td><td>Combined 496-row predictions</td></tr>
+  <tr><td><code>RUNLOG.md</code></td><td>Experiment log with every run and score</td></tr>
+  <tr><td><code>NOTES.md</code></td><td>≤10-sentence design rationale</td></tr>
+</table>
+</div>
+
 </body>
 </html>

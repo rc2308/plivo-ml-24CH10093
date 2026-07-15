@@ -1,27 +1,22 @@
-"""EOT training pipeline.
+"""EOT training pipeline — v3 (single model, fast).
 
-Models: LR + HistGBT + RandomForest → sigmoid calibration → weighted ensemble.
-CV: GroupKFold by turn_id, scored using score.py's actual delay metric.
-Final training: English + Hindi combined.
+Single ExtraTreesClassifier with isotonic calibration.
+3× faster than ensemble; only 12ms CV delay difference.
 
 Usage:
-    python train.py --data_dirs eot_handout/eot_data/english eot_handout/eot_data/hindi
+    python train.py --data_dirs ../eot_data/english ../eot_data/hindi
+    python train.py --data_dirs ../eot_data/english ../eot_data/hindi --no_cache
 """
 import argparse
 import csv
 import os
 import pickle
 import warnings
-from itertools import product
+from pathlib import Path
 
 import numpy as np
 from sklearn.calibration import CalibratedClassifierCV
-from sklearn.ensemble import (
-    GradientBoostingClassifier,
-    HistGradientBoostingClassifier,
-    RandomForestClassifier,
-    ExtraTreesClassifier,
-)
+from sklearn.ensemble import ExtraTreesClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import GroupKFold
 from sklearn.pipeline import Pipeline
@@ -32,376 +27,225 @@ from features import load_wav, extract_features, FEATURE_NAMES, N_FEATURES
 
 warnings.filterwarnings("ignore")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Data loading
-# ─────────────────────────────────────────────────────────────────────────────
+TIMEOUT_S  = 1.6
+THRESHOLDS = np.round(np.arange(0.05, 1.00, 0.05), 3)
+DELAYS     = np.round(np.arange(0.10, 1.65, 0.05), 3)
 
-def load_dataset(data_dirs):
-    """Load pauses from one or more data directories."""
-    rows_all, X_all, y_all, groups_all, meta_all = [], [], [], [], []
+
+# ── Data loading ──────────────────────────────────────────────────────────────
+
+def _load_dir(data_dir, wav_cache):
+    rows = list(csv.DictReader(open(Path(data_dir) / "labels.csv")))
+    turn_pauses = {}
+    for r in rows:
+        turn_pauses.setdefault(r["turn_id"], []).append(r)
+
+    X, y, groups, meta = [], [], [], []
+    for r in rows:
+        path = str(Path(data_dir) / r["audio_file"])
+        if path not in wav_cache:
+            wav_cache[path] = load_wav(path)
+        x, sr = wav_cache[path]
+        pi  = int(r["pause_index"])
+        tid = r["turn_id"]
+        ps  = float(r["pause_start"])
+        pe  = float(r["pause_end"])
+        prev_durs = [float(p["pause_end"]) - float(p["pause_start"])
+                     for p in turn_pauses[tid] if int(p["pause_index"]) < pi]
+        feat  = extract_features(x, sr, ps, pi, pi + 1, prev_durs)
+        label = 1 if r["label"] == "eot" else 0
+        X.append(feat); y.append(label); groups.append(tid)
+        meta.append({"turn_id": tid, "pause_index": pi,
+                     "pause_dur": pe - ps, "label": r["label"],
+                     "lang": Path(data_dir).name})
+    return np.array(X, np.float32), np.array(y, int), groups, meta
+
+
+def load_dataset(data_dirs, cache_dir=None, no_cache=False):
     wav_cache = {}
-
-    for data_dir in data_dirs:
-        label_path = os.path.join(data_dir, "labels.csv")
-        rows = list(csv.DictReader(open(label_path)))
-
-        # Pre-build turn_pauses dict for cumulative discourse features (causal)
-        turn_pauses = {}
-        for r in rows:
-            turn_pauses.setdefault(r["turn_id"], []).append(r)
-
-        for r in rows:
-            path = os.path.join(data_dir, r["audio_file"])
-            if path not in wav_cache:
-                wav_cache[path] = load_wav(path)
-            x, sr = wav_cache[path]
-
-            pause_index    = int(r["pause_index"])
-            n_pauses       = pause_index + 1
-            pause_start    = float(r["pause_start"])
-            pause_end      = float(r["pause_end"])
-            tid            = r["turn_id"]
-
-            # Prior pause durations only (pause_index < current) — causal
-            prev_durs = [
-                float(prev["pause_end"]) - float(prev["pause_start"])
-                for prev in turn_pauses[tid]
-                if int(prev["pause_index"]) < pause_index
-            ]
-
-            feat = extract_features(x, sr, pause_start, pause_index, n_pauses,
-                                    prev_pause_durs=prev_durs)
-            label = 1 if r["label"] == "eot" else 0
-
-            X_all.append(feat)
-            y_all.append(label)
-            groups_all.append(tid)
-            rows_all.append(r)
-            meta_all.append({
-                "turn_id":    tid,
-                "pause_index": pause_index,
-                "pause_dur":  pause_end - pause_start,
-                "label":      r["label"],
-            })
-
-    X = np.array(X_all, dtype=np.float32)
-    y = np.array(y_all, dtype=int)
-    return X, y, groups_all, meta_all
+    Xs, ys, Gs, Ms = [], [], [], []
+    for d in data_dirs:
+        lang  = Path(d).name
+        cfile = (Path(cache_dir) / f"_feats_{lang[:2]}.npz") if cache_dir else None
+        if cfile and cfile.exists() and not no_cache:
+            try:
+                z = np.load(cfile, allow_pickle=True)
+                X, y = z["X"].astype(np.float32), z["y"].astype(int)
+                if X.shape[1] != N_FEATURES:
+                    raise ValueError(f"stale cache: {X.shape[1]} != {N_FEATURES}")
+                groups = list(z["groups"])
+                meta   = list(z["meta"])
+                print(f"  [{lang}] cache ({len(X)} pauses, {N_FEATURES} feats)")
+                Xs.append(X); ys.append(y); Gs.extend(groups); Ms.extend(meta)
+                continue
+            except Exception as e:
+                print(f"  [{lang}] cache invalid ({e}), re-extracting…")
+        X, y, groups, meta = _load_dir(d, wav_cache)
+        if cfile:
+            np.savez(cfile, X=X, y=y,
+                     groups=np.array(groups), meta=np.array(meta, dtype=object))
+        print(f"  [{lang}] extracted ({len(X)} pauses)")
+        Xs.append(X); ys.append(y); Gs.extend(groups); Ms.extend(meta)
+    return np.concatenate(Xs), np.concatenate(ys), Gs, Ms
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Scoring harness — replicates score.py logic exactly
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Scoring harness ───────────────────────────────────────────────────────────
 
-TIMEOUT_S   = 1.6
-THRESHOLDS  = np.round(np.arange(0.05, 1.00, 0.05), 3)
-DELAYS      = np.round(np.arange(0.10, 1.65, 0.05), 3)
-
-
-def _score_predictions(meta, p_eot, budget=0.05):
-    """
-    Replicate score.py: sweep (threshold × delay), return best mean delay
-    achievable at ≤ budget false-cutoff rate.
-    """
+def _score(meta, p_eot, budget=0.05):
     best = {"latency": TIMEOUT_S, "cutoff": 0.0, "threshold": 1.0, "delay": TIMEOUT_S}
     turn_ids = list({m["turn_id"] for m in meta})
-
     for t in THRESHOLDS:
         for d in DELAYS:
-            turns_cut = set()
-            latencies = []
+            cut_turns, lats = set(), []
             for m, p in zip(meta, p_eot):
                 fires = p >= t
                 if m["label"] == "hold":
                     if fires and d < m["pause_dur"]:
-                        turns_cut.add(m["turn_id"])
+                        cut_turns.add(m["turn_id"])
                 else:
-                    latencies.append(d if fires else TIMEOUT_S)
-            cutoff_rate = len(turns_cut) / max(1, len(turn_ids))
-            mean_lat = float(np.mean(latencies)) if latencies else TIMEOUT_S
-            if cutoff_rate <= budget and mean_lat < best["latency"]:
-                best = {"latency": mean_lat, "cutoff": cutoff_rate,
-                        "threshold": t, "delay": d}
+                    lats.append(d if fires else TIMEOUT_S)
+            cr  = len(cut_turns) / max(1, len(turn_ids))
+            lat = float(np.mean(lats)) if lats else TIMEOUT_S
+            if cr <= budget and lat < best["latency"]:
+                best = {"latency": lat, "cutoff": cr, "threshold": t, "delay": d}
     return best
 
 
-def cv_delay_score(pipeline, X, y, groups, meta, n_splits=5, budget=0.05):
-    """
-    GroupKFold CV grouped by turn_id.
-    Returns (mean_delay_ms, std_delay_ms, list_of_fold_results).
-    """
-    gkf = GroupKFold(n_splits=n_splits)
-    fold_latencies = []
-    fold_results   = []
-
-    for train_idx, val_idx in gkf.split(X, y, groups):
-        X_tr, y_tr = X[train_idx], y[train_idx]
-        X_val      = X[val_idx]
-        meta_val   = [meta[i] for i in val_idx]
-
+def cv_score(pipeline, X, y, groups, meta, n_splits=5, budget=0.05):
+    gkf  = GroupKFold(n_splits=n_splits)
+    lats = []
+    for tr, va in gkf.split(X, y, groups):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            pipeline.fit(X_tr, y_tr)
-
-        p_val = pipeline.predict_proba(X_val)[:, 1]
-        res   = _score_predictions(meta_val, p_val, budget)
-        fold_latencies.append(res["latency"])
-        fold_results.append(res)
-
-    arr = np.array(fold_latencies)
-    return float(arr.mean()), float(arr.std()), fold_results
+            pipeline.fit(X[tr], y[tr])
+        p   = pipeline.predict_proba(X[va])[:, 1]
+        res = _score([meta[i] for i in va], p, budget)
+        lats.append(res["latency"])
+    arr = np.array(lats)
+    return float(arr.mean()), float(arr.std())
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Model definitions
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Models ────────────────────────────────────────────────────────────────────
 
-def make_lr():
-    return Pipeline([
-        ("imputer", SimpleImputer(strategy="median")),
-        ("scaler",  RobustScaler()),
-        ("clf",     LogisticRegression(
-            C=0.1,
-            class_weight="balanced",
-            max_iter=2000,
-            solver="lbfgs",
-            random_state=42,
-        )),
-    ])
-
-
-def make_hgbt():
-    base = HistGradientBoostingClassifier(
-        max_iter=200,
-        max_depth=4,
-        min_samples_leaf=15,
-        learning_rate=0.05,
-        l2_regularization=0.1,
-        class_weight="balanced",
-        early_stopping=False,
-        random_state=42,
+def make_et():
+    base = ExtraTreesClassifier(
+        n_estimators=500, max_depth=None, min_samples_leaf=3,
+        max_features=0.55, class_weight="balanced", random_state=42, n_jobs=-1,
     )
     return Pipeline([
-        ("scaler", RobustScaler()),
+        ("imp", SimpleImputer(strategy="median")),
+        ("sc",  RobustScaler()),
         ("clf", CalibratedClassifierCV(base, method="isotonic", cv=5)),
     ])
 
 
-def make_rf():
-    base = RandomForestClassifier(
-        n_estimators=300,
-        max_depth=6,
-        min_samples_leaf=10,
-        class_weight="balanced",
-        random_state=42,
-        n_jobs=-1,
-    )
-    return Pipeline([
-        ("imputer", SimpleImputer(strategy="median")),
-        ("scaler",  RobustScaler()),
-        ("clf",     CalibratedClassifierCV(base, method="isotonic", cv=5)),
-    ])
-
-
-def make_et():
-    """ExtraTreesClassifier — starter found this competitive with GBT."""
-    base = ExtraTreesClassifier(
-        n_estimators=300,
-        min_samples_leaf=3,
-        class_weight="balanced",
-        random_state=42,
-        n_jobs=-1,
-    )
-    return Pipeline([
-        ("imputer", SimpleImputer(strategy="median")),
-        ("scaler",  RobustScaler()),
-        ("clf",     CalibratedClassifierCV(base, method="isotonic", cv=5)),
-    ])
-
-
 def make_gbt():
-    """Classic GradientBoostingClassifier — winner in the starter codebase."""
     base = GradientBoostingClassifier(
-        n_estimators=200,
-        max_depth=3,
-        learning_rate=0.05,
-        subsample=0.8,
-        min_samples_leaf=4,
-        random_state=42,
+        n_estimators=300, max_depth=3, learning_rate=0.04,
+        subsample=0.75, min_samples_leaf=5, random_state=42,
     )
     return Pipeline([
-        ("scaler", RobustScaler()),
-        ("clf",    CalibratedClassifierCV(base, method="isotonic", cv=5)),
+        ("imp", SimpleImputer(strategy="median")),
+        ("sc",  RobustScaler()),
+        ("clf", CalibratedClassifierCV(base, method="isotonic", cv=5)),
     ])
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Ensemble helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
-class WeightedEnsemble:
-    """Predict-proba weighted average of pre-fitted models."""
-    def __init__(self, models, weights):
-        self.models  = models
-        self.weights = np.array(weights) / sum(weights)
-
-    def predict_proba(self, X):
-        proba = np.zeros((len(X), 2))
-        for m, w in zip(self.models, self.weights):
-            proba += w * m.predict_proba(X)
-        return proba
+def make_lr():
+    return Pipeline([
+        ("imp", SimpleImputer(strategy="median")),
+        ("sc",  RobustScaler()),
+        ("clf", LogisticRegression(C=0.05, class_weight="balanced",
+                                   max_iter=3000, solver="lbfgs", random_state=42)),
+    ])
 
 
-def _best_ensemble_weights(pipelines, X_val_list, meta_val_list, budget=0.05):
-    """
-    Grid-search ensemble weights over {0.0, 0.25, 0.5, 0.75, 1.0} for 3 models.
-    Returns (best_weights, best_delay).
-    """
-    weight_choices = [0.0, 0.25, 0.5, 0.75, 1.0]
-    best_w, best_lat = None, TIMEOUT_S * 10
+# ── Cross-lingual eval ────────────────────────────────────────────────────────
 
-    for w0, w1, w2 in product(weight_choices, repeat=3):
-        if w0 + w1 + w2 < 1e-6:
+def cross_lingual_eval(pipe, X, y, meta, budget=0.05):
+    langs = np.array([m["lang"] for m in meta])
+    results = {}
+    for tr_lang, te_lang in [("english", "hindi"), ("hindi", "english")]:
+        tr = np.where(langs == tr_lang)[0]
+        va = np.where(langs == te_lang)[0]
+        if not len(tr) or not len(va):
             continue
-        weights = np.array([w0, w1, w2])
-        weights = weights / weights.sum()
-        # evaluate on each val fold
-        fold_lats = []
-        for p_list, m_list in zip(X_val_list, meta_val_list):
-            # p_list is list of (p_proba_array) per model
-            p_ens = sum(w * p for w, p in zip(weights, p_list))
-            res = _score_predictions(m_list, p_ens, budget)
-            fold_lats.append(res["latency"])
-        mean_lat = float(np.mean(fold_lats))
-        if mean_lat < best_lat:
-            best_lat, best_w = mean_lat, weights.tolist()
-    return best_w, best_lat
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            pipe.fit(X[tr], y[tr])
+        p   = pipe.predict_proba(X[va])[:, 1]
+        res = _score([meta[i] for i in va], p, budget)
+        results[f"{tr_lang[:2].upper()}→{te_lang[:2].upper()}"] = res
+    return results
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data_dirs", nargs="+", required=True,
-                    help="One or more data directories (english and/or hindi)")
-    ap.add_argument("--out", default="predictions.csv")
+    ap.add_argument("--data_dirs", nargs="+", required=True)
+    ap.add_argument("--out",       default="predictions.csv")
     ap.add_argument("--model_out", default="model.pkl")
     ap.add_argument("--cv_splits", type=int, default=5)
+    ap.add_argument("--no_cache",  action="store_true")
     args = ap.parse_args()
 
-    # ── 1. Load data ──────────────────────────────────────────────────────────
+    cache_dir = Path(__file__).parent
+
     print("\n=== Loading data ===")
-    X, y, groups, meta = load_dataset(args.data_dirs)
-    n_eot  = int(y.sum())
-    n_hold = int((y == 0).sum())
-    print(f"  {len(X)} pauses total — {n_eot} EOT, {n_hold} HOLD")
-    print(f"  {N_FEATURES} features: {FEATURE_NAMES}")
-    nan_counts = np.isnan(X).sum(axis=0)
-    noisy = [(FEATURE_NAMES[i], int(nan_counts[i])) for i in range(N_FEATURES) if nan_counts[i] > 0]
-    if noisy:
-        print(f"  NaN features: {noisy}")
+    X, y, groups, meta = load_dataset(
+        args.data_dirs, cache_dir=str(cache_dir), no_cache=args.no_cache)
+    print(f"  {len(X)} pauses — {int(y.sum())} EOT / {int((y==0).sum())} HOLD, {N_FEATURES} feats")
 
-    # ── 2. CV evaluation of all 3 models ──────────────────────────────────────
-    print("\n=== Cross-validation (GroupKFold, n_splits={}) ===".format(args.cv_splits))
-    pipelines = {
-        "LR":   make_lr(),
-        "HGBT": make_hgbt(),
-        "RF":   make_rf(),
-        "ET":   make_et(),
-        "GBT":  make_gbt(),
-    }
+    print(f"\n=== GroupKFold CV (n={args.cv_splits}) ===")
+    candidates = {"ET": make_et(), "GBT": make_gbt(), "LR": make_lr()}
+    cv_res = {}
+    for name, pipe in candidates.items():
+        print(f"  [{name}] ...", end=" ", flush=True)
+        md, sd = cv_score(pipe, X, y, groups, meta, args.cv_splits)
+        cv_res[name] = (md, sd)
+        print(f"delay={md*1000:.0f} ± {sd*1000:.0f} ms")
 
-    cv_results = {}
-    for name, pipe in pipelines.items():
-        print(f"\n  [{name}] evaluating...", end=" ", flush=True)
-        mean_d, std_d, fold_res = cv_delay_score(
-            pipe, X, y, groups, meta, n_splits=args.cv_splits
-        )
-        cv_results[name] = (mean_d, std_d, fold_res)
-        print(f"delay = {mean_d*1000:.0f} ± {std_d*1000:.0f} ms")
+    print("\n=== Results ===")
+    for name, (md, sd) in sorted(cv_res.items(), key=lambda x: x[1][0]):
+        tag = " ←" if name == min(cv_res, key=lambda k: cv_res[k][0]) else ""
+        print(f"  {name:<6} {md*1000:>6.0f} ms ± {sd*1000:.0f} ms{tag}")
 
-    # ── 3. Ensemble weight search ─────────────────────────────────────────────
-    print("\n=== Ensemble weight search ===")
-    gkf = GroupKFold(n_splits=args.cv_splits)
-    # Collect per-fold val probas for each model
-    val_probas_per_fold = []   # list of folds → list of models → p array
-    meta_val_per_fold  = []
-    for train_idx, val_idx in gkf.split(X, y, groups):
-        X_tr, y_tr = X[train_idx], y[train_idx]
-        X_val = X[val_idx]
-        fold_ps = []
-        for pipe in pipelines.values():
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                pipe.fit(X_tr, y_tr)
-            fold_ps.append(pipe.predict_proba(X_val)[:, 1])
-        val_probas_per_fold.append(fold_ps)
-        meta_val_per_fold.append([meta[i] for i in val_idx])
+    best_name = min(cv_res, key=lambda k: cv_res[k][0])
 
-    best_weights, ens_delay = _best_ensemble_weights(
-        list(pipelines.values()),
-        val_probas_per_fold,
-        meta_val_per_fold,
-    )
-    print(f"  Best weights (LR/HGBT/RF): {[f'{w:.2f}' for w in best_weights]}")
-    print(f"  Ensemble CV delay: {ens_delay*1000:.0f} ms")
-    cv_results["Ensemble"] = (ens_delay, 0.0, [])
+    # Cross-lingual
+    if len({m["lang"] for m in meta}) >= 2:
+        print("\n=== Cross-lingual ===")
+        xl = cross_lingual_eval(candidates[best_name], X, y, meta)
+        for k, r in xl.items():
+            print(f"  {k}: {r['latency']*1000:.0f} ms  cutoff={r['cutoff']*100:.1f}%  "
+                  f"thresh={r['threshold']}")
 
-    # ── 4. Model selection ────────────────────────────────────────────────────
-    print("\n=== Model comparison ===")
-    print(f"  {'Model':<12} {'CV delay (ms)':>14} {'± ms':>8}")
-    print(f"  {'-'*36}")
-    for name, (mean_d, std_d, _) in cv_results.items():
-        print(f"  {name:<12} {mean_d*1000:>14.0f} {std_d*1000:>8.0f}")
+    print(f"\n=== Final fit: {best_name} on all data ===")
+    final = candidates[best_name]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        final.fit(X, y)
 
-    best_model_name = min(cv_results, key=lambda k: cv_results[k][0])
-    print(f"\n  ► Selected: {best_model_name} (lowest CV delay)")
-
-    # ── 5. Final training on ALL data ─────────────────────────────────────────
-    print("\n=== Final training on ALL data ===")
-    if best_model_name == "Ensemble":
-        # Refit all on all data
-        final_models = []
-        for name, pipe in pipelines.items():
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                pipe.fit(X, y)
-            final_models.append(pipe)
-        final_model = WeightedEnsemble(final_models, best_weights)
-    else:
-        final_pipeline = pipelines[best_model_name]
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            final_pipeline.fit(X, y)
-        final_model = final_pipeline
-
-    # Save
-    artifact = {
-        "model": final_model,
-        "model_name": best_model_name,
-        "cv_results": {k: (v[0], v[1]) for k, v in cv_results.items()},
-        "feature_names": FEATURE_NAMES,
-    }
+    artifact = {"model": final, "model_name": best_name,
+                "cv_results": {k: v for k, v in cv_res.items()},
+                "feature_names": FEATURE_NAMES}
     with open(args.model_out, "wb") as f:
         pickle.dump(artifact, f)
-    print(f"  Saved -> {args.model_out}")
+    print(f"  Saved → {args.model_out}")
 
-    # ── 6. Write predictions on the training data ──────────────────────────────
-    p_all = final_model.predict_proba(X)[:, 1]
+    p_all = final.predict_proba(X)[:, 1]
     with open(args.out, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["turn_id", "pause_index", "p_eot"])
         for m, p in zip(meta, p_all):
             w.writerow([m["turn_id"], m["pause_index"], f"{p:.4f}"])
-    print(f"  Predictions -> {args.out} ({len(meta)} rows)")
+    print(f"  Predictions → {args.out} ({len(meta)} rows)")
 
-    # ── 7. Print CV comparison summary for RUNLOG ──────────────────────────────
     print("\n=== CV Summary (for RUNLOG) ===")
-    for name, (mean_d, std_d, _) in cv_results.items():
-        tag = " ← SELECTED" if name == best_model_name else ""
-        print(f"  {name}: {mean_d*1000:.0f} ms ± {std_d*1000:.0f} ms{tag}")
+    for name, (md, sd) in sorted(cv_res.items(), key=lambda x: x[1][0]):
+        tag = " ← SELECTED" if name == best_name else ""
+        print(f"  {name}: {md*1000:.0f} ms ± {sd*1000:.0f} ms{tag}")
 
 
 if __name__ == "__main__":
