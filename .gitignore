@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.DS_Store
+*.pkl
+*.npz
+predictions*.csv
+base_en.csv
+.cache/
+eot_handout/

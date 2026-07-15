@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>EOT Detection — Summary</title>
+<style>
+  :root { color-scheme: dark; }
+  body { background:#141414; color:#e0e0e0; margin:0;
+         font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+         line-height:1.55; }
+  .wrap { max-width:860px; margin:0 auto; padding:48px 28px 80px; }
+  h1 { color:#fff; font-size:1.5rem; font-weight:600; margin:0 0 4px; }
+  .sub { color:#888; font-size:.95rem; margin-bottom:32px; }
+  h2 { color:#cbd5e1; font-size:1.05rem; font-weight:600; margin:36px 0 14px;
+       border-bottom:1px solid #2c2c2c; padding-bottom:8px; }
+  table { border-collapse:collapse; width:100%; background:#1e1e1e;
+          border-radius:10px; overflow:hidden; font-size:.92rem; }
+  th { background:#262626; color:#cbd5e1; text-align:left; padding:12px 18px; font-weight:600; }
+  td { padding:12px 18px; border-top:1px solid #2a2a2a; }
+  td:first-child { color:#fff; font-weight:600; }
+  .good { color:#4ade80; font-weight:700; }
+  .warn { color:#fbbf24; font-weight:700; }
+  .bad  { color:#f87171; }
+  .muted { color:#777; font-style:italic; }
+  .callout { background:#1a2230; border-left:3px solid #fbbf24; border-radius:6px;
+             padding:14px 18px; margin:14px 0; color:#d8dee9; font-size:.92rem; }
+  ol { padding-left:20px; } li { margin:9px 0; }
+  b.h { color:#fff; }
+  .tag { display:inline-block; background:#22c55e; color:#062; border-radius:4px;
+         font-size:.68rem; padding:2px 6px; font-weight:800; vertical-align:middle; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>End-of-Turn Detection — Results Summary</h1>
+  <div class="sub">Plivo ML · 24CH10093 · causal, cross-lingual (English + Hindi)</div>
+
+  <div class="callout">
+    <b class="h">Human intervention was the decisive factor.</b> The AI's first
+    pipeline scored a flattering <b>760&nbsp;ms / AUC&nbsp;0.920</b> on English —
+    but that was <i>in-sample</i>. The human caught it, rebuilt the validation
+    around turn-grouped, cross-lingual, delay-metric scoring, and surfaced the
+    <i>honest</i> number. That correction is what turned the game.
+  </div>
+
+  <h2>Honest scores (out-of-fold / cross-lingual)</h2>
+  <table>
+    <tr><th></th><th>English</th><th>Hindi (real target)</th></tr>
+    <tr><td>Honest delay</td>
+        <td class="warn">1299 ms</td>
+        <td class="good">831 ms <span class="tag">−48%</span></td></tr>
+    <tr><td>Honest AUC</td><td>0.639</td><td class="good">0.735</td></tr>
+    <tr><td>Operating threshold</td><td>0.45</td>
+        <td class="good">0.45 (was 0.05 ✓ fixed)</td></tr>
+    <tr><td>Interrupted turns</td><td>≤ 5%</td><td>≤ 5%</td></tr>
+    <tr><td class="muted">Baseline (silence-only)</td>
+        <td class="muted">1600 ms</td><td class="muted">1600 ms</td></tr>
+  </table>
+
+  <h2>The discrepancy the human caught</h2>
+  <table>
+    <tr><th>Number</th><th>AI's claim (in-sample)</th><th>Honest (OOF)</th></tr>
+    <tr><td>English AUC</td><td class="bad">0.920</td><td>~0.63</td></tr>
+    <tr><td>English delay</td><td class="bad">760 ms</td><td>~1250 ms</td></tr>
+    <tr><td>Hindi threshold</td><td colspan="2">0.05 ⚠ — model fires on
+        everything &amp; rides the timer → probabilities not separated → calibrated</td></tr>
+  </table>
+  <div class="callout">
+    <b class="h">Is it suspicious?</b> Yes — an in-sample 0.920 next to a
+    cross-lingual ~0.70 is the classic "looks solved on the training language,
+    barely transfers" gap. The honest Hindi ~850&nbsp;ms is the number to trust.
+  </div>
+
+  <h2>How we verified the model is not leaky</h2>
+  <table>
+    <tr><th>Check</th><th>Expect</th><th>Result</th></tr>
+    <tr><td>1. Label-shuffle OOF AUC</td><td>≈ 0.5</td><td class="good">✓ ≈ 0.5</td></tr>
+    <tr><td>2. Feature window ends at <code>pause_start</code></td><td>never past it</td><td class="good">✓</td></tr>
+    <tr><td>3. <code>pause_end</code> grep audit</td><td>scorer / prior-pause only</td><td class="good">✓</td></tr>
+    <tr><td>4. GroupKFold turn overlap</td><td>0</td><td class="good">✓</td></tr>
+    <tr><td>5. Cold Hindi holdout (20 turns)</td><td>≈ OOF range</td><td class="good">✓ ~850 ms</td></tr>
+  </table>
+
+  <h2>Where the human changed what the AI did</h2>
+  <ol>
+    <li><b class="h">Absolute → relative features.</b> Human rejected raw Hz/dB;
+        forced semitone ratios, percentile ranks and range-normalised slopes so
+        cues transfer across speakers and languages.</li>
+    <li><b class="h">Random split → GroupKFold by <code>turn_id</code></b>, scored
+        on the <b>real delay metric</b>, not accuracy/AUC.</li>
+    <li><b class="h">English-only → cross-lingual EN→HI</b> as the primary proxy
+        ("hidden test is mostly Hindi"); this exposed that raw-pitch features
+        transfer at chance.</li>
+    <li><b class="h">Rejected the 760 ms headline</b> as in-sample optimism and
+        reported the honest ~850 ms instead.</li>
+    <li><b class="h">Mandated the five leak checks</b> and reviewed each
+        <code>pause_end</code> access by hand.</li>
+    <li><b class="h">Caught two shipping bugs</b>: the cumulative-silence features
+        were dead (never passed <code>prev_pause_durs</code>), and the single tree
+        gave unseparated probabilities (threshold 0.05). Directed the fix — revive
+        the features and switch to an <b>LR + ExtraTrees ensemble</b> — which moved
+        the honest Hindi threshold to 0.45 and AUC to 0.735.</li>
+  </ol>
+  <p class="muted">The AI wrote code fast; the human made the judgement calls that
+  made it correct.</p>
+</div>
+</body>
+</html>
